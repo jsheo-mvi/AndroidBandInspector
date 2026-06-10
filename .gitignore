@@ -1,0 +1,7 @@
+bin/
+obj/
+reports/
+band-reports/
+.vs/
+*.user
+*.suo
