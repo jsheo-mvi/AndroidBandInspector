@@ -296,8 +296,16 @@ internal sealed class DeviceCollector(AdbClient adb, CliOptions options)
         "cmd phone ims get-ims-service -c",
         "cmd phone cc get-value carrier_volte_available_bool",
         "cmd phone cc get-value carrier_volte_provisioning_required_bool",
+        "cmd phone cc get-value carrier_vt_available_bool",
+        "cmd phone cc get-value carrier_wfc_ims_available_bool",
+        "cmd phone cc get-value carrier_allow_turnoff_ims_bool",
         "dumpsys ims",
         "dumpsys activity services org.codeaurora.ims",
+        "dumpsys package org.codeaurora.ims",
+        "pm list features",
+        "pm list packages",
+        "settings list global",
+        "settings list system",
         "settings get global preferred_network_mode",
         "settings get global preferred_network_mode1",
         "settings get global preferred_network_mode2"
@@ -356,12 +364,14 @@ internal sealed class DeviceCollector(AdbClient adb, CliOptions options)
         var primary = PrimaryBandAnalyzer.Assess(profile, currentBands, koreaMatches);
         var capability = CapabilityAnalyzer.Assess(profile, commandCaptures);
         var volte = VolteAnalyzer.Assess(profile, commandCaptures);
+        var ttaVolte = TtaVolteAnalyzer.Assess(profile, capability, volte, commandCaptures);
 
         return new BandEvidence(
             "Stock Android/ADB cannot reliably expose the full supported modem band matrix on many devices. This report maps observed serving-cell evidence to Korea mobile allocations from the supplied frequency-status PDF.",
             primary,
             capability,
             volte,
+            ttaVolte,
             currentBands,
             grouped,
             koreaMatches);
@@ -734,6 +744,10 @@ internal static class MarkdownReport
         builder.AppendLine();
         AppendVolte(builder, report.Evidence.VolteAssessment);
         builder.AppendLine();
+        builder.AppendLine("## TTA-VoLTE Assessment");
+        builder.AppendLine();
+        AppendTtaVolte(builder, report.Evidence.TtaVolteAssessment);
+        builder.AppendLine();
         builder.AppendLine("## Korea Frequency Allocation Matches");
         builder.AppendLine();
         AppendKoreaMatchTable(builder, report.Evidence.KoreaMatches);
@@ -831,6 +845,24 @@ internal static class MarkdownReport
         foreach (var evidence in assessment.EvidenceLines)
         {
             builder.AppendLine($"| {Escape(evidence)} |");
+        }
+    }
+
+    private static void AppendTtaVolte(StringBuilder builder, TtaVolteAssessment assessment)
+    {
+        builder.AppendLine($"- Status: `{assessment.Status}`");
+        builder.AppendLine($"- StandardReference: `{assessment.StandardReference}`");
+        builder.AppendLine($"- DeviceReadiness: `{assessment.DeviceReadiness}`");
+        builder.AppendLine($"- CertificationVerified: `{assessment.CertificationVerified}`");
+        builder.AppendLine($"- Confidence: `{assessment.Confidence}`");
+        builder.AppendLine($"- Note: {Escape(assessment.Note)}");
+        builder.AppendLine();
+
+        builder.AppendLine("| Check | Result | Evidence |");
+        builder.AppendLine("|---|---|---|");
+        foreach (var item in assessment.Checks)
+        {
+            builder.AppendLine($"| {Escape(item.Name)} | {item.Result} | {Escape(item.Evidence)} |");
         }
     }
 
@@ -957,6 +989,7 @@ internal sealed record BandEvidence(
     PrimaryBandAssessment PrimaryAssessment,
     DeviceCapabilityAssessment CapabilityAssessment,
     VolteAssessment VolteAssessment,
+    TtaVolteAssessment TtaVolteAssessment,
     IReadOnlyList<BandObservation> CurrentObservedBands,
     IReadOnlyList<BandObservation> AllObservations,
     IReadOnlyList<KoreaAllocationMatch> KoreaMatches);
@@ -1026,6 +1059,20 @@ internal sealed record VolteAssessment(
     string Confidence,
     string Note,
     IReadOnlyList<string> EvidenceLines);
+
+internal sealed record TtaVolteAssessment(
+    string Status,
+    string StandardReference,
+    string DeviceReadiness,
+    bool CertificationVerified,
+    string Confidence,
+    string Note,
+    IReadOnlyList<TtaVolteCheck> Checks);
+
+internal sealed record TtaVolteCheck(
+    string Name,
+    string Result,
+    string Evidence);
 
 internal sealed record ChannelBandRange(
     int Band,
@@ -1442,6 +1489,178 @@ internal static partial class VolteAnalyzer
 
     [GeneratedRegex(@"registered\w*\s*[=:]\s*false|ims.*not\s+registered", RegexOptions.IgnoreCase)]
     private static partial Regex RegisteredFalseRegex();
+}
+
+internal static class TtaVolteAnalyzer
+{
+    private const string StandardReference = "TTAK.KO-06.0357, 사업자 간 UICC 이동성 제공을 위한 VoLTE 단말 규격; IR.92/IR.94 기반";
+
+    public static TtaVolteAssessment Assess(
+        DeviceProfile profile,
+        DeviceCapabilityAssessment capability,
+        VolteAssessment volte,
+        IReadOnlyList<CommandCapture> commandCaptures)
+    {
+        var checks = new List<TtaVolteCheck>();
+        var allText = string.Join(Environment.NewLine, commandCaptures.Select(c => $"{c.Command}\n{c.Output}\n{c.Error}"));
+        var hasLte = capability.OsAllowedRats.Contains("LTE", StringComparer.OrdinalIgnoreCase);
+        var hasImsStack = volte.DeviceImsService is not null && volte.ImsServiceBound;
+        var packageOutput = ReadOutput(commandCaptures, "pm list packages");
+        var imsPackageOutput = ReadOutput(commandCaptures, "dumpsys package org.codeaurora.ims");
+
+        checks.Add(new TtaVolteCheck(
+            "LTE RAT allowed",
+            hasLte ? "Pass" : "Fail",
+            hasLte
+                ? $"OS allowed RATs include LTE: {string.Join(",", capability.OsAllowedRats)}"
+                : $"OS allowed RATs do not include LTE: {string.Join(",", capability.OsAllowedRats)}"));
+
+        checks.Add(new TtaVolteCheck(
+            "IMS service configured and bound",
+            hasImsStack ? "Pass" : "Fail",
+            hasImsStack
+                ? $"IMS service {volte.DeviceImsService} is bound to com.android.phone"
+                : "No bound Android IMS service evidence found"));
+
+        checks.Add(BuildCarrierConfigCheck(
+            "Carrier VoLTE availability config",
+            "cmd phone cc get-value carrier_volte_available_bool",
+            commandCaptures));
+
+        checks.Add(BuildCarrierConfigCheck(
+            "Carrier video telephony config",
+            "cmd phone cc get-value carrier_vt_available_bool",
+            commandCaptures));
+
+        checks.Add(BuildCarrierConfigCheck(
+            "Carrier IMS/WFC config",
+            "cmd phone cc get-value carrier_wfc_ims_available_bool",
+            commandCaptures));
+
+        checks.Add(new TtaVolteCheck(
+            "IMS package evidence",
+            ContainsAny(packageOutput, "org.codeaurora.ims", "vendor.qti.imsrcs") || !string.IsNullOrWhiteSpace(imsPackageOutput) ? "Pass" : "Unknown",
+            FirstEvidence(
+                MatchLine(packageOutput, "org.codeaurora.ims", "vendor.qti.imsrcs"),
+                string.IsNullOrWhiteSpace(imsPackageOutput) ? null : "dumpsys package org.codeaurora.ims returned package details",
+                "No IMS package listing evidence was available")));
+
+        checks.Add(new TtaVolteCheck(
+            "OMA-DM / IMS MO provisioning component",
+            ContainsAny(packageOutput, "omadm", "oma.dm", "dmclient", "dmc", "omacp") ? "Candidate" : "Unknown",
+            FirstEvidence(
+                MatchLine(packageOutput, "omadm", "oma.dm", "dmclient", "dmc", "omacp"),
+                "TTA-VoLTE requires operator IMS MO/parameter provisioning, but stock ADB may not expose the DM client clearly")));
+
+        checks.Add(new TtaVolteCheck(
+            "TTA-VoLTE SIP User-Agent marker",
+            allText.Contains("TTA-VoLTE/1.0", StringComparison.OrdinalIgnoreCase) ? "Pass" : "NotObservable",
+            allText.Contains("TTA-VoLTE/1.0", StringComparison.OrdinalIgnoreCase)
+                ? "TTA-VoLTE/1.0 marker found in collected output"
+                : "SIP User-Agent is only visible during IMS registration/SIP tracing; not observable from current stock ADB evidence"));
+
+        checks.Add(new TtaVolteCheck(
+            "MMTEL / video service feature evidence",
+            ContainsAny(allText, "mmtel", "android.telephony.ims.ImsService", "carrier_vt_available_bool") ? "Candidate" : "Unknown",
+            FirstEvidence(
+                MatchLine(allText, "mmtel", "android.telephony.ims.ImsService", "carrier_vt_available_bool"),
+                "IR.92/IR.94 protocol and codec compliance cannot be certified without IMS call/SIP/SDP test evidence")));
+
+        checks.Add(new TtaVolteCheck(
+            "Korea UICC mobility runtime verification",
+            HasUsim(profile) ? "RequiresLiveTest" : "NotVerifiable",
+            HasUsim(profile)
+                ? "USIM/operator evidence exists; live IMS registration and cross-carrier service tests are still required"
+                : "No USIM/operator numeric is present, so UICC mobility, carrier provisioning, and IMS registration cannot be verified"));
+
+        var passCount = checks.Count(c => c.Result == "Pass");
+        var hasHardFail = checks.Any(c => c.Result == "Fail");
+        var readiness = hasHardFail ? "Insufficient" : passCount >= 2 ? "Partial" : "Low";
+        var status = readiness == "Partial"
+            ? "TTA-VoLTE readiness partially evidenced; certification not verified"
+            : "TTA-VoLTE support not verified";
+        var confidence = readiness == "Partial" ? "Medium" : "Low";
+        var note = "TTA-VoLTE compliance requires Korean operator UICC mobility, IMS MO provisioning, SIP/SDP behavior, IR.92/IR.94 media handling, and live carrier interoperability tests. Stock ADB can only collect readiness evidence and cannot prove TTA certification.";
+
+        return new TtaVolteAssessment(
+            status,
+            StandardReference,
+            readiness,
+            CertificationVerified: false,
+            confidence,
+            note,
+            checks);
+    }
+
+    private static TtaVolteCheck BuildCarrierConfigCheck(
+        string name,
+        string command,
+        IReadOnlyList<CommandCapture> commandCaptures)
+    {
+        var capture = commandCaptures.FirstOrDefault(c => string.Equals(c.Command, command, StringComparison.OrdinalIgnoreCase));
+        if (capture is null)
+        {
+            return new TtaVolteCheck(name, "Unknown", "Command was not collected");
+        }
+
+        var text = $"{capture.Output} {capture.Error}".Trim();
+        if (capture.ExitCode != 0)
+        {
+            return new TtaVolteCheck(name, "NotVerifiable", Trim($"{command}: {text}"));
+        }
+
+        if (text.Contains("true", StringComparison.OrdinalIgnoreCase))
+        {
+            return new TtaVolteCheck(name, "Pass", Trim($"{command}: {text}"));
+        }
+
+        if (text.Contains("false", StringComparison.OrdinalIgnoreCase))
+        {
+            return new TtaVolteCheck(name, "Fail", Trim($"{command}: {text}"));
+        }
+
+        return new TtaVolteCheck(name, "Unknown", Trim($"{command}: {text}"));
+    }
+
+    private static string? ReadOutput(IReadOnlyList<CommandCapture> captures, string command)
+    {
+        var capture = captures.FirstOrDefault(c => string.Equals(c.Command, command, StringComparison.OrdinalIgnoreCase));
+        return capture is { ExitCode: 0 } ? capture.Output : null;
+    }
+
+    private static bool ContainsAny(string? value, params string[] patterns)
+    {
+        return value is not null && patterns.Any(pattern => value.Contains(pattern, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? MatchLine(string? value, params string[] patterns)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        return value.SplitLines()
+            .Select(line => line.Trim())
+            .FirstOrDefault(line => patterns.Any(pattern => line.Contains(pattern, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static string FirstEvidence(params string?[] values)
+    {
+        return values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? "No evidence";
+    }
+
+    private static bool HasUsim(DeviceProfile profile)
+    {
+        return !string.IsNullOrWhiteSpace(profile.OperatorNumeric)
+            && profile.OperatorNumeric.Trim(',', ' ', '\t') is { Length: > 0 };
+    }
+
+    private static string Trim(string value)
+    {
+        var normalized = value.ReplaceLineEndings(" ").Trim();
+        return normalized.Length <= 220 ? normalized : normalized[..220] + "...";
+    }
 }
 
 internal static class NetworkModeCatalog
