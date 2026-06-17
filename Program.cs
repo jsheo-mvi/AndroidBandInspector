@@ -28,7 +28,8 @@ Directory.CreateDirectory(options.OutputDirectory);
 
 try
 {
-    var adb = new AdbClient(options.AdbPath, options.CommandTimeout);
+    var resolvedAdbPath = AdbPathResolver.Resolve(options.AdbPath);
+    var adb = new AdbClient(resolvedAdbPath, options.CommandTimeout);
     var devices = await adb.ListDevicesAsync();
     if (!string.IsNullOrWhiteSpace(options.Serial))
     {
@@ -40,7 +41,7 @@ try
     if (devices.Count == 0)
     {
         Console.Error.WriteLine("No authorized USB Android device was found.");
-        Console.Error.WriteLine("Check USB debugging, RSA authorization, and `adb devices -l`.");
+        Console.Error.WriteLine($"Check USB debugging, RSA authorization, and `{Path.GetFileName(resolvedAdbPath)} devices -l`.");
         return 2;
     }
 
@@ -161,9 +162,112 @@ Examples:
 
 Notes:
   - This tool does not root the device and does not change radio settings.
+  - ADB is auto-detected from --adb, .\platform-tools\adb.exe, common Android SDK paths, or PATH.
   - Full supported modem band capability is often not exposed by stock Android over ADB.
   - Reports separate observed bands from framework-advertised and unavailable evidence.
 """;
+}
+
+internal static class AdbPathResolver
+{
+    public static string Resolve(string configuredPath)
+    {
+        if (!string.Equals(configuredPath, "adb", StringComparison.OrdinalIgnoreCase))
+        {
+            return ResolveExplicitPath(configuredPath);
+        }
+
+        var candidates = BuildCandidates().Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in candidates)
+        {
+            if (IsExecutableCandidate(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        throw new AdbException(
+            "Cannot find adb. Download Android SDK Platform-Tools from https://developer.android.com/tools/releases/platform-tools, " +
+            "then either place the platform-tools folder next to AndroidBandInspector.exe or pass --adb <path-to-adb.exe>.");
+    }
+
+    private static string ResolveExplicitPath(string configuredPath)
+    {
+        var fullPath = Path.GetFullPath(configuredPath);
+        if (!File.Exists(fullPath))
+        {
+            throw new AdbException($"The --adb path does not exist: {fullPath}");
+        }
+
+        return fullPath;
+    }
+
+    private static IEnumerable<string> BuildCandidates()
+    {
+        var baseDirectory = AppContext.BaseDirectory;
+        var currentDirectory = Environment.CurrentDirectory;
+
+        yield return Path.Combine(baseDirectory, "platform-tools", "adb.exe");
+        yield return Path.Combine(baseDirectory, "tools", "platform-tools", "adb.exe");
+        yield return Path.Combine(currentDirectory, "platform-tools", "adb.exe");
+        yield return Path.Combine(currentDirectory, "tools", "platform-tools", "adb.exe");
+
+        foreach (var root in EnvironmentRoots("ANDROID_HOME", "ANDROID_SDK_ROOT"))
+        {
+            yield return Path.Combine(root, "platform-tools", "adb.exe");
+        }
+
+        yield return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Android",
+            "Sdk",
+            "platform-tools",
+            "adb.exe");
+        yield return @"C:\Android\platform-tools\adb.exe";
+        yield return "adb";
+    }
+
+    private static IEnumerable<string> EnvironmentRoots(params string[] names)
+    {
+        foreach (var name in names)
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                yield return value;
+            }
+        }
+    }
+
+    private static bool IsExecutableCandidate(string candidate)
+    {
+        if (Path.IsPathFullyQualified(candidate) || candidate.Contains(Path.DirectorySeparatorChar))
+        {
+            return File.Exists(candidate);
+        }
+
+        return FindOnPath(candidate) is not null;
+    }
+
+    private static string? FindOnPath(string executableName)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return null;
+        }
+
+        foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var candidate = Path.Combine(directory, executableName);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
 }
 
 internal sealed class AdbClient(string adbPath, TimeSpan timeout)

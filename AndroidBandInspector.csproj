@@ -12,4 +12,10 @@
     <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Content Include="LICENSE" CopyToPublishDirectory="Always" />
+    <Content Include="README.md" CopyToPublishDirectory="Always" />
+    <Content Include="Run-AndroidBandInspector.cmd" CopyToPublishDirectory="Always" />
+  </ItemGroup>
+
 </Project>

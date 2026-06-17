@@ -106,6 +106,12 @@ dotnet build .\AndroidBandInspector.csproj
 .\AndroidBandInspector.exe --out .\reports
 ```
 
+더블클릭 실행:
+
+```powershell
+.\Run-AndroidBandInspector.cmd
+```
+
 소스에서 실행:
 
 ```powershell
@@ -130,9 +136,51 @@ ADB 경로를 직접 지정:
 dotnet run -- --adb "C:\Android\platform-tools\adb.exe" --out .\reports
 ```
 
+## Standalone 실행
+
+배포 파일은 .NET Runtime이 없어도 실행되는 Windows x64 self-contained exe입니다.
+단, USB Android 기기와 통신하려면 Google Android SDK Platform-Tools의 `adb.exe`가 필요합니다.
+
+ADB는 라이선스 동의가 필요한 Google Android SDK Platform-Tools 구성요소이므로 이 GPL 배포 zip에 포함하지 않습니다.
+공식 다운로드 페이지에서 Platform-Tools를 내려받아 압축을 푼 뒤 다음 중 하나로 배치하세요.
+
+- 권장: `AndroidBandInspector.exe` 옆에 `platform-tools` 폴더를 둡니다.
+  - 예: `AndroidBandInspector-win-x64\platform-tools\adb.exe`
+- 또는 기존 설치 경로를 PATH에 추가합니다.
+- 또는 실행 시 `--adb "C:\Android\platform-tools\adb.exe"`를 지정합니다.
+
+공식 다운로드:
+
+- <https://developer.android.com/tools/releases/platform-tools>
+
+배포 폴더 예:
+
+```text
+AndroidBandInspector-win-x64\
+  AndroidBandInspector.exe
+  Run-AndroidBandInspector.cmd
+  README.md
+  LICENSE
+  platform-tools\
+    adb.exe
+    AdbWinApi.dll
+    AdbWinUsbApi.dll
+```
+
+자동 탐색 순서:
+
+1. `--adb <path>`
+2. exe 옆 `platform-tools\adb.exe`
+3. exe 옆 `tools\platform-tools\adb.exe`
+4. 현재 작업 디렉터리의 `platform-tools\adb.exe`
+5. `ANDROID_HOME` / `ANDROID_SDK_ROOT`
+6. `%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe`
+7. `C:\Android\platform-tools\adb.exe`
+8. PATH의 `adb`
+
 ## 사전 조건
 
-- Android Platform Tools의 `adb`
+- Android SDK Platform-Tools의 `adb`
 - 스마트폰의 Developer options 및 USB debugging 활성화
 - PC에서 RSA debugging authorization 승인
 
